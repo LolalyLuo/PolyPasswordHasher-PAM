@@ -1,6 +1,8 @@
 #include <libpolypasswordhasher.h>
 
+
 int main() {
+        PPH_ERROR error;
 	pph_context *context;
   	printf("initial context\n");
   	uint8 threshold;
@@ -13,7 +15,18 @@ int main() {
 
 	context = pph_init_context(threshold, isolated_check_bits);
 
-	pph_store_context(context, "/etc/PPHdata");
+	error = pph_store_context(context, "/home/lolaly/PolyPasswordHasher-PAM/PPHdata");
+        if (error != PPH_ERROR_OK){
+          printf("can't store context, erorr: %d \n", error);
+	}
+        FILE* secretfile;
+        secretfile = fopen("/home/lolaly/PolyPasswordHasher-PAM/ramdisk/secret", "w+");
+        if (secretfile == NULL){
+          printf("can't save secret!" );
+        }else {
+          fprintf(secretfile, "%s", context->secret);
+	}
+	fclose(secretfile);
 	pph_destroy_context(context);
 	printf("context is initialed and stored!\n");
-}
+} 

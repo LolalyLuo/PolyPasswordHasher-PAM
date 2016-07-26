@@ -1,6 +1,6 @@
 default:
 	gcc -fPIC -fno-stack-protector -c  PPHpam.c -lpolypasswordhasher
-	sudo ld -x --shared -o mypam.so PPHpam.o libpolypasswordhasher.o libgfshare.o -lssl -lcrypto
+	sudo ld -x --shared -o PPHpam.so PPHpam.o libgfshare.o -lssl -lcrypto -lpolypasswordhasher
 
 install: default
-	sudo cp mypam.so /lib/security/
+	sudo cp PPHpam.so /lib/security/

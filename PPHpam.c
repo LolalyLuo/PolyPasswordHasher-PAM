@@ -11,7 +11,9 @@
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
 #include <libpolypasswordhasher.h>
+#define MAX_PASSWD_TRIES 3
 
+void get_secret(pph_context *context);
 
 PAM_EXTERN int pam_sm_setcred( pam_handle_t *pamh, int flags, int argc, const char **argv ) {
 	pam_syslog(pamh, LOG_NOTICE, "PPH: Set credenticial successed!\n");
@@ -35,83 +37,160 @@ PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh, int flags, int argc, con
 
 //authentication 
 PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, const char **argv ) {
-	openlog("PAM_PPH: ",LOG_NOWAIT, LOG_LOCAL1);
-	pam_syslog(pamh, LOG_INFO, "PPH: pam_sm_authenticate is being called. \n");
 	struct pam_conv *conv;
 	struct pam_message msg;
 	const struct pam_message *msgp;
 	struct pam_response *resp;
 
-	int retval, pam_err;
+	int retval, error;
 	const char* username;
 	const char* password;
+	int retry = 0;
+	pph_context *context;
 	
-	//checking username and setup syslog
-	retval = pam_get_user(pamh, &username, "Username(pam): ");	
-	if (retval != PAM_SUCCESS) {
-		pam_syslog(pamh, LOG_ERR, "PPH: can't access username. \n");
-		return retval;
-	}
-	
-	//get password 
-	pam_err = pam_get_authtok(pamh, PAM_AUTHTOK, &password, "What is your password: ");
-	if (pam_err != PAM_SUCCESS){
-
-		pam_syslog(pamh, LOG_ERR, "PPH: can't get password. \n");
-		return pam_err;
-	}
-	
-	//verify password
-	pam_syslog(pamh, LOG_INFO, "PPH: authenticating, got username &password. \n");
-
 	
 	return PAM_SUCCESS;
+	//load context and secret if available
+	/*openlog("PAM_PPH: ",LOG_NOWAIT, LOG_LOCAL1);
+	pam_syslog(pamh, LOG_INFO, "PPH: pam_sm_authenticate is being called. \n");
+	
+	context =  pph_reload_context("/home/lolaly/PolyPasswordHasher-PAM/PPHdata");
+	if (context == NULL){
+		pam_syslog(pamh, LOG_ERR, "PPH: Can't open context\n");
+		return PAM_AUTHINFO_UNAVAIL;
+	}
+	get_secret(context);
+	//if the secret is available, inform the system		
+	if (context->secret != NULL) {
+		pam_syslog(pamh, LOG_ERR,"secret is now available, it is %s\n", context->secret);
+	} else {
+		//if the secret is not available, check if there is enough shares to unlock the secret
+	}
+	
+	//authenticate the user with PPH
+	while ((error != PPH_ERROR_OK) && (retry++ < MAX_PASSWD_TRIES)){
+		//get username from user
+		retval = pam_get_user(pamh, &username, "username(pph_pam): ");	
+		if (retval != PAM_SUCCESS) {
+			pam_syslog(pamh, LOG_ERR, "PPH: can't access username. \n");
+			return retval;
+		}
+		//get password from userr
+		retval = pam_get_authtok(pamh, PAM_AUTHTOK, &password, "password(pph_pam): ");
+		if (retval != PAM_SUCCESS){
+			pam_syslog(pamh, LOG_ERR, "PPH: can't get password. \n");
+			return retval;
+		}
+		//try to authenticate the user with PPH database
+		error = pph_check_login(context, username, strlen(username), password, strlen(password));
+		//return the correct message for the user 
+		if (error == PPH_ERROR_OK){
+			pam_syslog(pamh, LOG_INFO, "PPH: Authenticate user successfully \n");
+		}else if (error == PPH_ACCOUNT_IS_INVALID){
+			pam_syslog(pamh, LOG_INFO, "PPH: Either username or password is incorrect \n");
+		}else {
+			pam_syslog(pamh, LOG_INFO, "PPH: Fail to authenticate the user for other errors \n");
+		}
+	}
+
+	//after authentication, destroy the context we used
+	if (pph_destroy_context(context) != PPH_ERROR_OK){
+		pam_syslog(pamh, LOG_ERR, "PPH: Can't destroy context %d \n", error);
+		exit(1);
+	}
+	
+	//lastly, return correct value
+	if (error == PPH_ERROR_OK){
+		return PAM_SUCCESS;
+	}else if (retry == 3){
+		return PAM_MAXTRIES;
+	}else {
+		return PAM_AUTH_ERR;
+	}*/
 }	
 
 
 
 //change password
 PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const char **argv){
-	int retval;
-	const char *user;
+	int retval, error;
+	const char *username;
 	const char *password;
-	//authenticate user
-	retval = pam_get_user(pamh, &user, NULL);
+	pph_context *context;
+	//get the username from user
+	retval = pam_get_user(pamh, &username, NULL);
 	if (retval != PAM_SUCCESS){
 		pam_syslog(pamh, LOG_ERR, "PPH: Trouble getting username \n");
 		return retval;
 	}
-	printf("================\n");
-	
+	//get the new password from user
 	retval = pam_get_authtok(pamh, PAM_AUTHTOK, &password, "NEW password: ");
 	if (retval != PAM_SUCCESS){
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't get password \n");
 		return retval;
 	}
-	pph_context *context;
-	context =  pph_reload_context("/etc/PPHdata");
-	if (context == NULL){
-		pam_syslog(pamh, LOG_ERR, "PPH: Can't open context\n");
-		return PAM_TRY_AGAIN;
-	}
-	retval = pph_create_account(context, user, strlen(user), password, strlen(password), 0);
-	if (retval == PPH_ERROR_OK){
-		pph_store_context(context, "/etc/PPHdata");
-		pph_destroy_context(context);
-		pam_syslog(pamh, LOG_INFO, "PPH: create a new user successfully\n");
+	//check prelim at first call, which is if the context is loaded successfully
+ 	if (flags == PAM_PRELIM_CHECK) {
+		pam_syslog(pamh, LOG_INFO,"pam prelim checking\n");
 		return PAM_SUCCESS;
 	}
-	else if (retval == PPH_ACCOUNT_EXISTS) {
-		pph_change_password(context, user, strlen(user), password, strlen(password));
-		
+	//if it is not prelim check, load context to get ready to change password 
+	context =  pph_reload_context("/home/lolaly/PolyPasswordHasher-PAM/PPHdata");
+	if (context == NULL){
+		pam_syslog(pamh, LOG_ERR, "PPH: Can't open context\n");
+		return PAM_AUTHTOK_LOCK_BUSY;
 	}
-	else {
-		pam_syslog(pamh, LOG_ERR, "PPH: Can't change password currently %d \n", retval);	
-		return PAM_TRY_AGAIN;
+	get_secret(context);
+	//if the secret is available, inform the system		
+	if (context->secret != NULL) {
+		pam_syslog(pamh, LOG_ERR,"secret is now available, it is %s\n", context->secret);
 	}
+	//try to use the user name and password to create a user
+	error = pph_create_account(context, username, strlen(username), password, strlen(password), 0);
+	pam_syslog(pamh, LOG_ERR, "PPH: the return value of pph_create_account is %d\n", error);
+	if (error == PPH_ERROR_OK) {
+		pam_syslog(pamh, LOG_INFO, "PPH: created a new user with new password successfully!\n");
+	} else if (error == PPH_ACCOUNT_EXISTS) {
+		error = pph_change_password(context, username, strlen(username), password, strlen(password));
+		if (error == PPH_ERROR_OK) {
+			pam_syslog(pamh, LOG_INFO, "PPH: changed password successfully!\n");
+		}
+	} else {
+		pam_syslog(pamh, LOG_ERR, "PPH: Can't change password currently %d \n", error);	
+	}
+	//up to here we can store/destroy context
+	if (pph_store_context(context, "/home/lolaly/PolyPasswordHasher-PAM/PPHdata") != PPH_ERROR_OK){
+		pam_syslog(pamh, LOG_ERR, "PPH: Can't store context %d \n", error);
+		exit(1);
+	}
+	
+	if (pph_destroy_context(context) != PPH_ERROR_OK){
+		pam_syslog(pamh, LOG_ERR, "PPH: Can't destroy context %d \n", error);
+		exit(1);
+	}
+	closelog();
+	//lastly, return the right PAM value
+	if (error == PPH_ERROR_OK) {
+		return PAM_SUCCESS;
+	} else {
+		return 	PAM_AUTHTOK_LOCK_BUSY;
+	}
+	
 }
 
 
-
+void get_secret(pph_context *context){
+	FILE *secretfile;
+	//uint8 *thesecret;
+	secretfile = fopen("/home/lolaly/PolyPasswordHasher-PAM/ramdisk/secret", "r");
+	if (secretfile == NULL) {
+ 		return;
+	}
+	char buffer[1024];
+	//thesecret = malloc(sizeof buffer);
+	//thesecret = fgets(buffer, sizeof buffer, secretfile);
+	context->secret =malloc(fgets(buffer, sizeof buffer, secretfile));
+	fclose(secretfile);
+}
 
 
