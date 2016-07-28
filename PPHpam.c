@@ -42,23 +42,26 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 	const struct pam_message *msgp;
 	struct pam_response *resp;
 
-	int retval, error;
+	int retval;
+	int error = -1;
 	const char* username;
 	const char* password;
 	int retry = 0;
 	pph_context *context;
 	
 	
-	return PAM_SUCCESS;
-	//load context and secret if available
-	/*openlog("PAM_PPH: ",LOG_NOWAIT, LOG_LOCAL1);
+	//return PAM_SUCCESS;
+	//set up syslog
+	openlog("PAM_PPH: ",LOG_NOWAIT, LOG_LOCAL1);
 	pam_syslog(pamh, LOG_INFO, "PPH: pam_sm_authenticate is being called. \n");
 	
+	//load context and secret if available
 	context =  pph_reload_context("/home/lolaly/PolyPasswordHasher-PAM/PPHdata");
 	if (context == NULL){
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't open context\n");
 		return PAM_AUTHINFO_UNAVAIL;
 	}
+	pam_syslog(pamh, LOG_INFO, "PPH: context is loaded. \n");
 	get_secret(context);
 	//if the secret is available, inform the system		
 	if (context->secret != NULL) {
@@ -66,47 +69,49 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 	} else {
 		//if the secret is not available, check if there is enough shares to unlock the secret
 	}
-	
+	pam_syslog(pamh, LOG_INFO, "PPH: secret is loaded  \n");
 	//authenticate the user with PPH
-	while ((error != PPH_ERROR_OK) && (retry++ < MAX_PASSWD_TRIES)){
-		//get username from user
-		retval = pam_get_user(pamh, &username, "username(pph_pam): ");	
-		if (retval != PAM_SUCCESS) {
-			pam_syslog(pamh, LOG_ERR, "PPH: can't access username. \n");
-			return retval;
-		}
-		//get password from userr
-		retval = pam_get_authtok(pamh, PAM_AUTHTOK, &password, "password(pph_pam): ");
-		if (retval != PAM_SUCCESS){
-			pam_syslog(pamh, LOG_ERR, "PPH: can't get password. \n");
-			return retval;
-		}
-		//try to authenticate the user with PPH database
-		error = pph_check_login(context, username, strlen(username), password, strlen(password));
-		//return the correct message for the user 
-		if (error == PPH_ERROR_OK){
-			pam_syslog(pamh, LOG_INFO, "PPH: Authenticate user successfully \n");
-		}else if (error == PPH_ACCOUNT_IS_INVALID){
-			pam_syslog(pamh, LOG_INFO, "PPH: Either username or password is incorrect \n");
-		}else {
-			pam_syslog(pamh, LOG_INFO, "PPH: Fail to authenticate the user for other errors \n");
-		}
+	
+
+	//get username from user
+	pam_syslog(pamh, LOG_ERR, "PPH: in the loop. \n");
+	retval = pam_get_user(pamh, &username, "username(pph_pam): ");	
+	if (retval != PAM_SUCCESS) {
+		pam_syslog(pamh, LOG_ERR, "PPH: can't access username. \n");
+		return retval;
 	}
+	//get password from userr
+	retval = pam_get_authtok(pamh, PAM_AUTHTOK, &password, "password(pph_pam): ");
+	if (retval != PAM_SUCCESS){
+		pam_syslog(pamh, LOG_ERR, "PPH: can't get password. \n");
+		return retval;
+	}
+	//try to authenticate the user with PPH database
+	error = pph_check_login(context, username, strlen(username), password, strlen(password));
+	//return the correct message for the user 
+	if (error == PPH_ERROR_OK){
+		pam_syslog(pamh, LOG_INFO, "PPH: Authenticate user successfully \n");
+	}else if (error == PPH_ACCOUNT_IS_INVALID){
+		pam_syslog(pamh, LOG_INFO, "PPH: Either username or password is incorrect \n");
+	}else {
+		pam_syslog(pamh, LOG_INFO, "PPH: Fail to authenticate the user for other errors \n");
+	}
+
 
 	//after authentication, destroy the context we used
 	if (pph_destroy_context(context) != PPH_ERROR_OK){
-		pam_syslog(pamh, LOG_ERR, "PPH: Can't destroy context %d \n", error);
-		exit(1);
+		pam_syslog(pamh, LOG_ERR, "PPH: Can't destroy context\n");
+		return PAM_AUTH_ERR;
 	}
+	pam_syslog(pamh, LOG_ERR, "PPH: before return ,the error is %d \n", error);
 	
+//	username = password = NULL;
 	//lastly, return correct value
 	if (error == PPH_ERROR_OK){
 		return PAM_SUCCESS;
-	}else if (retry == 3){
-		return PAM_MAXTRIES;
 	}else {
 		return PAM_AUTH_ERR;
-	}*/
+	}
 }	
 
 
@@ -117,6 +122,10 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 	const char *username;
 	const char *password;
 	pph_context *context;
+
+	//set up syslog
+	openlog("PAM_PPH: ",LOG_NOWAIT, LOG_LOCAL1);
+	pam_syslog(pamh, LOG_INFO, "PPH: pam_sm_chauthtok is being called. \n");
 	//get the username from user
 	retval = pam_get_user(pamh, &username, NULL);
 	if (retval != PAM_SUCCESS){
