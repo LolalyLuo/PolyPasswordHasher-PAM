@@ -11,9 +11,20 @@
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
 #include <libpolypasswordhasher.h>
+#include "libgfshare.h"
 #define MAX_PASSWD_TRIES 3
 
+struct _gfshare_ctx {
+  unsigned int sharecount;
+  unsigned int threshold;
+  unsigned int size;
+  unsigned char* sharenrs;
+  unsigned char* buffer;
+  unsigned int buffersize;
+};
+
 void get_secret(pph_context *context);
+void get_share(pph_context *context);
 
 PAM_EXTERN int pam_sm_setcred( pam_handle_t *pamh, int flags, int argc, const char **argv ) {
 	pam_syslog(pamh, LOG_NOTICE, "PPH: Set credenticial successed!\n");
@@ -37,10 +48,10 @@ PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh, int flags, int argc, con
 
 //authentication 
 PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, const char **argv ) {
-	struct pam_conv *conv;
+	/*struct pam_conv *conv;
 	struct pam_message msg;
 	const struct pam_message *msgp;
-	struct pam_response *resp;
+	struct pam_response *resp;*/
 
 	int retval;
 	int error = -1;
@@ -50,9 +61,8 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 	pph_context *context;
 	
 	
-	//return PAM_SUCCESS;
+	//return PAM_AUTH_ERR;
 	//set up syslog
-	openlog("PAM_PPH: ",LOG_NOWAIT, LOG_LOCAL1);
 	pam_syslog(pamh, LOG_INFO, "PPH: pam_sm_authenticate is being called. \n");
 	
 	//load context and secret if available
@@ -62,19 +72,26 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 		return PAM_AUTHINFO_UNAVAIL;
 	}
 	pam_syslog(pamh, LOG_INFO, "PPH: context is loaded. \n");
-	get_secret(context);
-	//if the secret is available, inform the system		
-	if (context->secret != NULL) {
-		pam_syslog(pamh, LOG_ERR,"secret is now available, it is %s\n", context->secret);
-	} else {
-		//if the secret is not available, check if there is enough shares to unlock the secret
-	}
-	pam_syslog(pamh, LOG_INFO, "PPH: secret is loaded  \n");
-	//authenticate the user with PPH
 	
+	//load secret and share context if available. 
+	get_secret(context);
+	get_share(context);
+	//if the secret and share are still not available, try to unlock them		
+	if (context->secret == NULL || context->share_context == NULL) {
+	
+	}
+	//after unlock the secret &shares, if it's still not available, inform system
+	//if it is available, set to normal operation and inform the system
+	if(context->secret == NULL || context->share_context == NULL){
+		pam_syslog(pamh, LOG_ERR,"The secret or share context is still not available\n");
+	} else {
+		context->is_normal_operation = true;
+		pam_syslog(pamh, LOG_ERR,"Both secret and share context are now available\n");
+	}
 
+
+	//authenticate the user with PPH
 	//get username from user
-	pam_syslog(pamh, LOG_ERR, "PPH: in the loop. \n");
 	retval = pam_get_user(pamh, &username, "username(pph_pam): ");	
 	if (retval != PAM_SUCCESS) {
 		pam_syslog(pamh, LOG_ERR, "PPH: can't access username. \n");
@@ -86,8 +103,12 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 		pam_syslog(pamh, LOG_ERR, "PPH: can't get password. \n");
 		return retval;
 	}
+
+	pam_syslog(pamh, LOG_ERR, "PPH: username: %s, password: %s\n", username, password);
 	//try to authenticate the user with PPH database
+
 	error = pph_check_login(context, username, strlen(username), password, strlen(password));
+	
 	//return the correct message for the user 
 	if (error == PPH_ERROR_OK){
 		pam_syslog(pamh, LOG_INFO, "PPH: Authenticate user successfully \n");
@@ -97,15 +118,16 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 		pam_syslog(pamh, LOG_INFO, "PPH: Fail to authenticate the user for other errors \n");
 	}
 
-
+	
 	//after authentication, destroy the context we used
 	if (pph_destroy_context(context) != PPH_ERROR_OK){
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't destroy context\n");
 		return PAM_AUTH_ERR;
 	}
-	pam_syslog(pamh, LOG_ERR, "PPH: before return ,the error is %d \n", error);
+	pam_syslog(pamh, LOG_ERR, "PPH: before return ,the error is %d, context operation is: %d \n", error, 4);
 	
-//	username = password = NULL;
+	//if autheticated successfully and the secret is not available, 
+	//check if the account is a protector account and save shares
 	//lastly, return correct value
 	if (error == PPH_ERROR_OK){
 		return PAM_SUCCESS;
@@ -113,6 +135,9 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 		return PAM_AUTH_ERR;
 	}
 }	
+
+
+	
 
 
 
@@ -124,7 +149,6 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 	pph_context *context;
 
 	//set up syslog
-	openlog("PAM_PPH: ",LOG_NOWAIT, LOG_LOCAL1);
 	pam_syslog(pamh, LOG_INFO, "PPH: pam_sm_chauthtok is being called. \n");
 	//get the username from user
 	retval = pam_get_user(pamh, &username, NULL);
@@ -177,12 +201,11 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't destroy context %d \n", error);
 		exit(1);
 	}
-	closelog();
 	//lastly, return the right PAM value
 	if (error == PPH_ERROR_OK) {
 		return PAM_SUCCESS;
 	} else {
-		return 	PAM_AUTHTOK_LOCK_BUSY;
+		return 	PAM_AUTH_ERR;
 	}
 	
 }
@@ -190,16 +213,35 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 
 void get_secret(pph_context *context){
 	FILE *secretfile;
-	//uint8 *thesecret;
 	secretfile = fopen("/home/lolaly/PolyPasswordHasher-PAM/ramdisk/secret", "r");
 	if (secretfile == NULL) {
  		return;
 	}
-	char buffer[1024];
-	//thesecret = malloc(sizeof buffer);
-	//thesecret = fgets(buffer, sizeof buffer, secretfile);
-	context->secret =malloc(fgets(buffer, sizeof buffer, secretfile));
+	context->secret=malloc(sizeof(*context->secret)*DIGEST_LENGTH);
+  	if(context->secret == NULL){
+    		return;
+  	}
+	fread(context->secret, DIGEST_LENGTH, 1, secretfile);
+	context->AES_key = context->secret;
+	printf("end of getting secret\n");
 	fclose(secretfile);
 }
+
+void get_share(pph_context *context) {
+	FILE *sharefile;
+	sharefile = fopen("/home/lolaly/PolyPasswordHasher-PAM/ramdisk/share", "r");
+	if (sharefile == NULL) {
+ 		return;
+	}
+	context->share_context = malloc(sizeof(gfshare_ctx));
+	fread(context->share_context, sizeof(gfshare_ctx), 1, sharefile);
+	context->share_context->sharenrs =  malloc(context->share_context->sharecount);
+	fread(context->share_context->sharenrs, context->share_context->sharecount, 1, sharefile);
+	context->share_context->buffer = malloc(context->share_context->buffersize);
+	fread(context->share_context->buffer, context->share_context->buffersize, 1, sharefile);
+	fclose(sharefile);
+}
+
+	
 
 
