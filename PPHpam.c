@@ -1,3 +1,7 @@
+#include "config.h"
+#include<sys/types.h>
+#include<sys/stat.h>
+#include<unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,8 +29,11 @@ struct _gfshare_ctx {
 
 void get_secret(pph_context *context);
 void get_share_context(pph_context *context);
-void store_secret(pph_context *context);
-void store_share_context(pph_context *context);
+void store_secret(pam_handle_t *pamh, pph_context *context);
+void store_share_context(pam_handle_t *pamh, pph_context *context);
+void store_account(pam_handle_t *pamh, const char* username, const char* password);
+void unlock_context(pam_handle_t *pamh, pph_context *context);
+int mount_ram(const char* theFile);
 
 PAM_EXTERN int pam_sm_setcred( pam_handle_t *pamh, int flags, int argc, const char **argv ) {
 	pam_syslog(pamh, LOG_NOTICE, "PPH: Set credenticial successed!\n");
@@ -50,10 +57,6 @@ PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh, int flags, int argc, con
 
 //authentication 
 PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, const char **argv ) {
-	/*struct pam_conv *conv;
-	struct pam_message msg;
-	const struct pam_message *msgp;
-	struct pam_response *resp;*/
 
 	int retval;
 	int error = -1;
@@ -66,12 +69,10 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 	pph_account_node *target = NULL;
 	uint8 sharenumber;
 	
-	//return PAM_SUCCESS;
-	//set up syslog
 	pam_syslog(pamh, LOG_INFO, "PPH: pam_sm_authenticate is being called. \n");
 	
-	//load context and secret if available
-	context =  pph_reload_context("/home/lolaly/PolyPasswordHasher-PAM/PPHdata");
+	//load context
+	context =  pph_reload_context(PPH_CONTEXT_FILE);
 	if (context == NULL){
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't open context\n");
 		return PAM_AUTHINFO_UNAVAIL;
@@ -83,7 +84,7 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 	//load secret and share context if available. 
 	get_secret(context);
 	get_share_context(context);
-	//if the secret and share are still not available, try to unlock them		
+	//if both secret and share context are available, finish bootstraping		
 	if (context->secret != NULL && context->share_context != NULL) {
 		context->is_normal_operation = true;
 		pam_syslog(pamh, LOG_ERR,"Both secret and share context are now available\n");
@@ -103,9 +104,7 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 		return retval;
 	}
 
-	pam_syslog(pamh, LOG_ERR, "PPH: username: %s, password: %s\n", username, password);
 	//try to authenticate the user with PPH database
-
 	error = pph_check_login(context, username, strlen(username), password, strlen(password));
 	
 	//return the correct message for the user 
@@ -118,8 +117,7 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 	}
 	
 
-	//If the account authenticated is a protector account, put it into a file
-	//for bootstrapping purpose
+	//If the account authenticated is a protector account, put it into a file for bootstrapping purpose
 	if (error == PPH_ERROR_OK && context->is_normal_operation == false){
 		search = context->account_data;
 		while(search!=NULL){
@@ -133,9 +131,9 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
   		}	
 		sharenumber = target->account.entries->share_number;
 		if (sharenumber != SHIELDED_ACCOUNT && sharenumber != BOOTSTRAP_ACCOUNT){
-			store_account(username, password);
-			unlock_context(context);
-			}
+			store_account(pamh,username, password);
+			//after storing account, try to use it to unlock the context and save secret and share context in files
+			unlock_context(pamh, context);
 		}
 	}
 
@@ -145,8 +143,6 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't destroy context\n");
 	}
 	
-	//if autheticated successfully and the secret is not available, 
-	//check if the account is a protector account and save shares
 	//lastly, return correct value
 	if (error == PPH_ERROR_OK){
 		return PAM_SUCCESS;
@@ -167,7 +163,6 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 	const char *password;
 	pph_context *context;
 
-	//set up syslog
 	pam_syslog(pamh, LOG_INFO, "PPH: pam_sm_chauthtok is being called. \n");
 	//get the username from user
 	retval = pam_get_user(pamh, &username, NULL);
@@ -181,13 +176,15 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't get password \n");
 		return retval;
 	}
+
 	//check prelim at first call, which is if the context is loaded successfully
  	if (flags == PAM_PRELIM_CHECK) {
 		pam_syslog(pamh, LOG_INFO,"pam prelim checking\n");
 		return PAM_SUCCESS;
 	}
+
 	//if it is not prelim check, load context to get ready to change password 
-	context =  pph_reload_context("/home/lolaly/PolyPasswordHasher-PAM/PPHdata");
+	context =  pph_reload_context(PPH_CONTEXT_FILE);
 	if (context == NULL){
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't open context\n");
 		return PAM_AUTHTOK_LOCK_BUSY;
@@ -206,7 +203,6 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 
 	//try to use the user name and password to create a user
 	error = pph_create_account(context, username, strlen(username), password, strlen(password), 0);
-	pam_syslog(pamh, LOG_ERR, "PPH: the return value of pph_create_account is %d\n", error);
 	if (error == PPH_ERROR_OK) {
 		pam_syslog(pamh, LOG_INFO, "PPH: created a new user with new password successfully!\n");
 	} else if (error == PPH_ACCOUNT_EXISTS) {
@@ -217,14 +213,15 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 	} else {
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't change password currently %d \n", error);	
 	}
-	//up to here we can store/destroy context
-	if (pph_store_context(context, "/home/lolaly/PolyPasswordHasher-PAM/PPHdata") != PPH_ERROR_OK){
+	//up to here we can store and destroy context
+	if (pph_store_context(context, PPH_CONTEXT_FILE) != PPH_ERROR_OK){
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't store context %d \n", error);
 	}
 	
 	if (pph_destroy_context(context) != PPH_ERROR_OK){
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't destroy context %d \n", error);
 	}
+
 	//lastly, return the right PAM value
 	if (error == PPH_ERROR_OK) {
 		return PAM_SUCCESS;
@@ -237,7 +234,7 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 
 void get_secret(pph_context *context){
 	FILE *secretfile;
-	secretfile = fopen("/home/lolaly/PolyPasswordHasher-PAM/ramdisk/secret", "r");
+	secretfile = fopen(PPH_SECRET_FILE, "r");
 	if (secretfile == NULL) {
  		return;
 	}
@@ -253,7 +250,7 @@ void get_secret(pph_context *context){
 
 void get_share_context(pph_context *context) {
 	FILE *sharefile;
-	sharefile = fopen("/home/lolaly/PolyPasswordHasher-PAM/ramdisk/share", "r");
+	sharefile = fopen(PPH_SHARE_FILE, "r");
 	if (sharefile == NULL) {
  		return;
 	}
@@ -266,9 +263,22 @@ void get_share_context(pph_context *context) {
 	fclose(sharefile);
 }
 
-void store_account(const char* username, const char* password){
+void store_account(pam_handle_t *pamh, const char* username, const char* password){
 	FILE *accountfile;
-	accountfile = fopen("/home/lolaly/PolyPasswordHasher-PAM/ramdisk/account", "a");
+	int error = mount_ram(PPH_RAMDISK);
+	if(error){
+		pam_syslog(pamh, LOG_ERR, "PPH: Error saving account information%d \n", error);
+		return;
+	}		
+	//make/open file in the mounted folder
+	char pph_account_file[MAX_PATH_LENGTH];
+	if (strlen(PPH_RAMDISK) > (MAX_PATH_LENGTH - 10)){
+		pam_syslog(pamh, LOG_ERR, "PPH: Path of the ramdisk is too long%d \n", error);
+		return;
+	}
+	strcpy(pph_account_file, PPH_RAMDISK);
+	strcat(pph_account_file, "account");
+	accountfile = fopen(pph_account_file, "a");
 	if (accountfile == NULL) {
  		return;
 	}
@@ -279,9 +289,23 @@ void store_account(const char* username, const char* password){
 }
 
 
-void store_secret(pph_context *context){
+void store_secret(pam_handle_t *pamh, pph_context *context){
 	FILE* secretfile;
-        secretfile = fopen("/home/lolaly/PolyPasswordHasher-PAM/ramdisk/secret", "w+");
+	int error = mount_ram(PPH_RAMDISK);
+	if(error){
+		pam_syslog(pamh, LOG_ERR, "PPH: Error saving account information%d \n", error);
+		return;
+	}		
+	//make/open file in the mounted folder
+	char pph_secret_file[MAX_PATH_LENGTH];
+	if (strlen(PPH_RAMDISK) >(MAX_PATH_LENGTH - 10)){
+		pam_syslog(pamh, LOG_ERR, "PPH: Path of the ramdisk is too long%d \n", error);
+		return;
+	}
+	strcpy(pph_secret_file, PPH_RAMDISK);
+	strcat(pph_secret_file, "secret");
+	secretfile = fopen(pph_secret_file, "w+");
+ 
         if (secretfile == NULL){
           printf("can't save secret!" );
         }else {
@@ -289,9 +313,23 @@ void store_secret(pph_context *context){
 	}
 	fclose(secretfile);
 }
-void store_share_context(pph_context *context){
+void store_share_context(pam_handle_t *pamh, pph_context *context){
 	FILE* sharefile;
-	sharefile = fopen("/home/lolaly/PolyPasswordHasher-PAM/ramdisk/share", "w+");
+	int error = mount_ram(PPH_RAMDISK);
+	if(error){
+		pam_syslog(pamh, LOG_ERR, "PPH: Error saving account information%d \n", error);
+		return;
+	}		
+	//make/open file in the mounted folder
+	char pph_share_file[MAX_PATH_LENGTH];
+	if (strlen(PPH_RAMDISK) > (MAX_PATH_LENGTH - 10)){
+		pam_syslog(pamh, LOG_ERR, "PPH: Path of the ramdisk is too long%d \n", error);
+		return;
+	}
+	strcpy(pph_share_file, PPH_RAMDISK);
+	strcat(pph_share_file, "account");
+	sharefile = fopen(pph_share_file, "w+");
+
         if (sharefile == NULL){
           	printf("can't save secret!" );
         }else {
@@ -303,9 +341,9 @@ void store_share_context(pph_context *context){
 
 }
 
-void unlock_context(pph_context *context){
+void unlock_context(pam_handle_t *pamh, pph_context *context){
 	FILE *accountfile;
-	accountfile = fopen("/home/lolaly/PolyPasswordHasher-PAM/ramdisk/account", "r");
+	accountfile = fopen(PPH_ACCOUNT_FILE, "r");
 	if (accountfile != NULL) {
 		char pro_username[MAX_USERNAME_LENGTH];
 		char pro_password[MAX_PASSWORD_LENGTH];
@@ -325,8 +363,8 @@ void unlock_context(pph_context *context){
 		}
 		unlockret = pph_unlock_password_data(context, index+1, usernames, username_lengths, passwords, password_lengths);
 		if (unlockret == PPH_ERROR_OK) {
-			store_secret(context);
-			store_share_context(context);
+			store_secret(pamh,context);
+			store_share_context(pamh,context);
 			fclose(accountfile);
 			remove(accountfile);
 		} else {
@@ -335,5 +373,29 @@ void unlock_context(pph_context *context){
 	}
 }
 
+int mount_ram(const char* theFile){
+	struct stat data;
+	struct stat parent_data;
+	int error;
+ 	char parent[200]; // should correct to the maximum pathlength
 
+	error = stat(theFile, &data);
+	if (error) 
+		return error;
+
+	snprintf(parent, 200, "%s/..", theFile);	
+	error = stat(parent, &parent_data);
+
+	if (error)
+		return error;
+
+	if ((data.st_dev != parent_data.st_dev) ||
+		(data.st_dev == parent_data.st_dev && data.st_ino == parent_data.st_ino)) {
+		printf("is mountpoint\n");
+    	} else {
+        	printf("Is not mountpoint\n");
+   	}
+
+	return error;
+}
 
