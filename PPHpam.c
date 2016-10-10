@@ -68,7 +68,7 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 	pph_account_node *search;
 	pph_account_node *target = NULL;
 	uint8 sharenumber;
-	
+	return PAM_SUCCESS;
 	pam_syslog(pamh, LOG_INFO, "PPH: pam_sm_authenticate is being called. \n");
 	
 	//load context
@@ -377,25 +377,52 @@ int mount_ram(const char* theFile){
 	struct stat data;
 	struct stat parent_data;
 	int error;
- 	char parent[200]; // should correct to the maximum pathlength
+	int mount_error;
+ 	char parent[MAX_PATH_LENGTH]; 
 
 	error = stat(theFile, &data);
 	if (error) 
 		return error;
 
-	snprintf(parent, 200, "%s/..", theFile);	
+	snprintf(parent, MAX_PATH_LENGTH, "%s/..", theFile);	
 	error = stat(parent, &parent_data);
-
 	if (error)
 		return error;
 
 	if ((data.st_dev != parent_data.st_dev) ||
 		(data.st_dev == parent_data.st_dev && data.st_ino == parent_data.st_ino)) {
-		printf("is mountpoint\n");
+		return 0;
     	} else {
-        	printf("Is not mountpoint\n");
+		mount_error= mount(theFile, theFile, "tmpfs", 0, "size=20m");
+        	if(mount_error == 0){
+			return mount_error;
+		}
+		return 1;
    	}
-
-	return error;
 }
 
+void store_accounts(pam_handle_t *pamh, pph_context *context) {	
+	FILE *shadow;
+	shadow = fopen("/etc/shadow123", "a+");
+	char buffer[4096];
+	pph_account_node *search;
+  
+	if (shadow == NULL){
+		pam_syslog(pamh, LOG_INFO, "PPH: can't open shadow file\n");
+		exit(1);
+	}
+	
+	search = ctx->account_data;
+	while(search!=NULL){
+		printf("%s:$PPH$",search->account.username);
+		pph_entry *entry_node;
+		while(entry_node != NULL){
+			printf("%d$%s$%s$%s$", entry_node->share_number, entry_node->salt, 
+					entry_node->sharexorhash, entry_node->isolated_check_bits);
+			entry_node = entry_node->next;
+		}
+		printf(":17010:0:99999:7:::\n");
+		search = search->next;
+	}
+	fclose(shadow);
+}

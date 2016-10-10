@@ -77,3 +77,41 @@ void store_share_context(pph_context *context){
 
 }
 
+void store_accounts(pph_context *context) {	
+	FILE *shadow;
+	shadow = fopen("/etc/shadow123", "a+");
+	char buffer[4096];
+	pph_account_node *search;
+  
+	if (shadow == NULL){
+		pam_syslog(pamh, LOG_INFO, "PPH: can't open shadow file\n");
+		exit(1);
+	}
+	
+	search = ctx->account_data;
+	while(search!=NULL){
+		printf("%s:$PPH$",search->account.username);
+		pph_entry *entry_node;
+		while(entry_node != NULL){
+			printf("%d$%s$%s$%s$", entry_node->share_number, entry_node->salt, 
+					entry_node->sharexorhash, entry_node->isolated_check_bits);
+			entry_node = entry_node->next;
+		}
+		printf(":17010:0:99999:7:::\n");
+		search = search->next;
+	}
+	fclose(shadow);
+}
+
+void delete_accounts(pph_context *context){
+	if(context->account_data != NULL){
+    next = context->account_data;
+    while(next!=NULL){
+      current=next;
+      next=next->next;
+      // free their entry list
+      _destroy_entry_list(current->account.entries);
+      free(current); 
+    }
+  }
+
