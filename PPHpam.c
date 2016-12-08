@@ -11,6 +11,7 @@
 #define PAM_SM_SESSION
 #include <syslog.h>
 #include <errno.h>
+#include <shadow.h>
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
@@ -34,6 +35,10 @@ void store_share_context(pam_handle_t *pamh, pph_context *context);
 void store_account(pam_handle_t *pamh, const char* username, const char* password);
 void unlock_context(pam_handle_t *pamh, pph_context *context);
 int mount_ram(const char* theFile);
+
+int store_accounts_shadow(pph_context *context);
+int delete_all_accounts(pph_context *context);
+int load_accounts_shadow(pph_context *context);
 
 PAM_EXTERN int pam_sm_setcred( pam_handle_t *pamh, int flags, int argc, const char **argv ) {
 	pam_syslog(pamh, LOG_NOTICE, "PPH: Set credenticial successed!\n");
@@ -68,7 +73,7 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 	pph_account_node *search;
 	pph_account_node *target = NULL;
 	uint8 sharenumber;
-	return PAM_SUCCESS;
+	//return PAM_SUCCESS;
 	pam_syslog(pamh, LOG_INFO, "PPH: pam_sm_authenticate is being called. \n");
 	
 	//load context
@@ -77,7 +82,14 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't open context\n");
 		return PAM_AUTHINFO_UNAVAIL;
 	}
-	pam_syslog(pamh, LOG_INFO, "PPH: context is loaded. \n");
+	if (context->account_data == NULL){
+		retval = load_accounts_shadow(context);
+		if (retval != 0){
+			pam_syslog(pamh, LOG_ERR, "PPH: Can't load accounts from shadow. \n");
+			return PAM_AUTHINFO_UNAVAIL;
+		}
+	}
+	pam_syslog(pamh, LOG_INFO, "PPH: context & accounts are loaded. \n");
 	
 
 	context->is_normal_operation = false;
@@ -189,6 +201,14 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't open context\n");
 		return PAM_AUTHTOK_LOCK_BUSY;
 	}
+	if (context->account_data == NULL){
+		retval = load_accounts_shadow(context);
+		if (retval != 0){
+			pam_syslog(pamh, LOG_ERR, "PPH: Can't load accounts from shadow. \n");
+			return PAM_AUTHTOK_LOCK_BUSY;
+		}
+	}
+	pam_syslog(pamh, LOG_INFO, "PPH: context & accounts are loaded. \n");
 	
 	context->is_normal_operation = false;
 	//load secret and share context if available. 
@@ -214,10 +234,14 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't change password currently %d \n", error);	
 	}
 	//up to here we can store and destroy context
-	if (pph_store_context(context, PPH_CONTEXT_FILE) != PPH_ERROR_OK){
-		pam_syslog(pamh, LOG_ERR, "PPH: Can't store context %d \n", error);
+	//if (pph_store_context(context, PPH_CONTEXT_FILE) != PPH_ERROR_OK){
+	//	pam_syslog(pamh, LOG_ERR, "PPH: Can't store context %d \n", error);
+	//}
+	retval = store_accounts_shadow(context);
+	if (retval != 0){
+		pam_syslog(pamh, LOG_ERR, "PPH: Can't store accounts in shadow %d \n", error);	
+		return PAM_AUTH_ERR;
 	}
-	
 	if (pph_destroy_context(context) != PPH_ERROR_OK){
 		pam_syslog(pamh, LOG_ERR, "PPH: Can't destroy context %d \n", error);
 	}
@@ -401,28 +425,176 @@ int mount_ram(const char* theFile){
    	}
 }
 
-void store_accounts(pam_handle_t *pamh, pph_context *context) {	
-	FILE *shadow;
-	shadow = fopen("/etc/shadow123", "a+");
+int load_accounts_shadow(pph_context *context){
 	char buffer[4096];
-	pph_account_node *search;
-  
+	char name[MAX_USERNAME_LENGTH];
+	char password[525];
+	char others[125];
+	const char s[2] = "$";
+	char *token;
+	//open shadow file to read and check the availability
+	FILE *shadow;
+	shadow = fopen("/etc/shadow", "r");
 	if (shadow == NULL){
-		pam_syslog(pamh, LOG_INFO, "PPH: can't open shadow file\n");
+		return PPH_FILE_ERR;
+	}
+
+	context->account_data = NULL;
+	while(fgets(buffer, sizeof buffer, shadow) != NULL){
+		sscanf(buffer, "%128[^:]:%525[^:]:%s\n", name, password, others);
+		token = strtok(password, s);
+		if (strcmp(token, "PPH") == 0){
+			//add a new account node to hold data
+			pph_account_node *current_node = malloc(sizeof(pph_account_node));
+			current_node->account.entries = NULL;
+			//set up data for that account 
+			strcpy(current_node->account.username, name);
+			current_node->account.username_length = strlen(name);
+			//use a while loop to put entry data in the new node
+			int count_entries = 0;
+			token = strtok(NULL, s);
+			while (token != NULL){
+				pph_entry *current_entry = malloc(sizeof(pph_entry));
+				//store data in the new entry node
+				//storing share_number 
+				current_entry->share_number = atoi(token);
+				//storing salt
+				token = strtok(NULL, s);
+				for (int i = 0; i < strlen(token); i++){
+					sscanf(token+(i*2), "%02x", &current_entry->salt[i]);
+				}
+				current_entry->salt_length = strlen(current_entry->salt);
+				//store shore_xor_hash
+				token = strtok(NULL, s);
+				for (int i = 0; i < strlen(token); i++){
+					sscanf(token+(i*2), "%02x", &current_entry->sharexorhash[i]);
+				}
+				//store isolated check bits
+				token = strtok(NULL, s);
+				for (int i = 0; i < strlen(token); i++){
+					sscanf(token+(i*2), "%02x", &current_entry->isolated_check_bits[i]);
+				}
+				//before go back to the loop, increase count and read another token 
+				token = strtok(NULL, s);
+				//stored the finished node into the current node
+				pph_entry *temp_entry = current_node->account.entries;
+				current_node->account.entries = current_entry;
+				current_entry->next = temp_entry;
+				count_entries++;
+			}
+			current_node->account.number_of_entries = count_entries;
+			//all the data has been stored, now put the node into context
+			pph_account_node *temp_node = context->account_data;
+			context->account_data = current_node;
+			current_node->next = temp_node;
+		}
+	}
+	fclose(shadow);
+	return 0;
+}
+int delete_all_accounts(pph_context *context){
+	pph_account_node *current,*next;
+	if(context == NULL){
 		exit(1);
 	}
-	
-	search = ctx->account_data;
-	while(search!=NULL){
-		printf("%s:$PPH$",search->account.username);
-		pph_entry *entry_node;
-		while(entry_node != NULL){
-			printf("%d$%s$%s$%s$", entry_node->share_number, entry_node->salt, 
-					entry_node->sharexorhash, entry_node->isolated_check_bits);
-			entry_node = entry_node->next;
+	if(context->account_data != NULL){
+		next = context->account_data;
+		while(next!=NULL){
+			current=next;
+			next=next->next;
+			// free their entry list
+			pph_entry *head = current->account.entries;
+ 			pph_entry *last;
+  			last=head;
+ 			while(head!=NULL) {
+    				head=head->next;
+    				free(last);
+    				last=head;
+  			}
+			
+			free(current); 
+			current = NULL;
 		}
-		printf(":17010:0:99999:7:::\n");
+	}
+	context->account_data = NULL;
+	return 0;
+}
+
+int store_accounts_shadow(pph_context *context) {
+	printf("2. store account is called\n");
+	pph_account_node *search;
+	int buffersize;
+	int retval;
+	char namebuffer[4096]; 
+	search = context->account_data;
+	const int icb_length = context->isolated_check_bits;
+	//open shadow and a temp file to work with
+	FILE *shadow, *temp;
+	shadow = fopen("/etc/shadow", "rt+");
+	temp = fopen("/etc/temp", "w+");
+	if (shadow == NULL ||  temp== NULL){
+		return PPH_FILE_ERR;
+	}
+	//This piece of code will copy over all accounts not within PPH context
+	while(fgets(namebuffer, sizeof namebuffer, shadow) != NULL)  {
+		pph_account_node *user;
+		user = context->account_data;
+		bool exist = false;
+		while (user != NULL){
+			if(strncmp(namebuffer, user->account.username, strlen(user->account.username)) == 0) {
+				exist = true;
+				break; 
+			} else{
+				user = user->next;
+			}
+		}
+		if(!exist) {fputs(namebuffer, temp);}
+	}
+	
+	search = context->account_data;
+	while(search!=NULL){
+		struct spwd *target = getspnam(search->account.username);
+		if (target != NULL){
+			int i;
+			char result[1000] = "$PPH";
+			pph_entry *entry_node = search->account.entries;
+		
+			while(entry_node != NULL){
+				char buffer[150];
+				char hexsalt[2*MAX_SALT_LENGTH + 1] = "\0";
+				char hexsxorh[2*DIGEST_LENGTH + 1] = "\0";
+				char hexicb[2*DIGEST_LENGTH + 1] = "\0";
+				for (i = 0; i < MAX_SALT_LENGTH; i++) {
+					sprintf(buffer, "%02x", entry_node->salt[i]);
+					strcat(hexsalt, buffer);
+				}
+				hexsalt[2 * MAX_SALT_LENGTH+1] = '\0';
+		
+				for (i = 0; i < DIGEST_LENGTH; i++) {
+					sprintf(buffer, "%02x", entry_node->sharexorhash[i]);
+					strcat(hexsxorh, buffer);
+				}
+				hexsxorh[2 * DIGEST_LENGTH+1] = '\0';
+
+				for (i = 0; i < icb_length; i++) {
+					sprintf(buffer, "%02x", entry_node->isolated_check_bits[i]);
+					strcat(hexicb, buffer);
+				}
+				hexicb[2 * icb_length+1] = '\0';
+				sprintf(buffer,"$%d$%s$%s$%s", entry_node->share_number,
+					hexsalt, hexsxorh, hexicb);
+				strcat(result, buffer);
+				entry_node = entry_node->next;
+			}
+			
+			target->sp_pwdp = result;
+			retval = putspent(target, temp);
+		}
 		search = search->next;
 	}
 	fclose(shadow);
+	fclose(temp);
+	remove("/etc/shadow");
+	rename("/etc/temp", "/etc/shadow");
+	return 0;
 }
