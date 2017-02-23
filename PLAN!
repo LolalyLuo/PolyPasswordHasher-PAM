@@ -1,0 +1,10 @@
+1.pph_load_shadow
+2.pph_store_shadow
+3.Before store context, delete all accounts
+
+When loading context, load context->load shadow
+When finished, store_shadow->delete all accounts->store context
+
+For each account: 
+	change binary to decimal,then save to shadow with format
+	change decimal to binary, then load into context 
